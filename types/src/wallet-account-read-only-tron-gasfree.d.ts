@@ -143,7 +143,11 @@ export type TronGasfreeWalletConfig = {
     /**
      * - The url of the tron web provider, or an instance of the {@link TronWeb} class.
      */
-    provider: string | TronWeb;
+    provider: string | TronWeb | Array<string | TronWeb>;
+    /**
+     * - The number of retries in the failover mechanism.
+     */
+    retries?: number;
     /**
      * - The gasfree provider's url.
      */
