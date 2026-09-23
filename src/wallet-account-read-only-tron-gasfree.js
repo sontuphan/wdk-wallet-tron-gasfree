@@ -142,9 +142,7 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
    * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
    */
   async quoteSendTransaction (tx) {
-    throw new Error(
-      "Method 'quoteSendTransaction(tx)' not supported on tron gasfree."
-    )
+    throw new Error("Method 'quoteSendTransaction(tx)' not supported on tron gasfree.")
   }
 
   /**
@@ -292,9 +290,7 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
     const chainId = Number(this._config.chainId)
 
     if (![NILE_CHAIN_ID, TRON_CHAIN_ID].includes(chainId)) {
-      throw new Error(
-        `Gas free provider does not support this chain with id ${chainId}`
-      )
+      throw new Error(`Gas free provider does not support this chain with id ${chainId}`)
     }
 
     const url = this._config.gasFreeProvider + path
@@ -339,20 +335,14 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
   async _getTronReadOnlyAccount () {
     const address = await this.getAddress()
 
-    const tronReadOnlyAccount = new WalletAccountReadOnlyTron(
-      address,
-      this._config
-    )
+    const tronReadOnlyAccount = new WalletAccountReadOnlyTron(address, this._config)
 
     return tronReadOnlyAccount
   }
 
   /** @private */
   async _getTokenTransferHash (id) {
-    const response = await this._sendRequestToGasfreeProvider(
-      'GET',
-      `/api/v1/gasfree/${id}`
-    )
+    const response = await this._sendRequestToGasfreeProvider('GET', `/api/v1/gasfree/${id}`)
 
     const resp = await response.json()
 
