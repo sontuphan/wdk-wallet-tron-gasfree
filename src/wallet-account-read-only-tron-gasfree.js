@@ -16,11 +16,11 @@
 
 import { createHmac } from 'crypto'
 
-import { WalletAccountReadOnly } from '@tetherto/wdk-wallet'
+import { WalletAccountReadOnly, NoSuchElementError } from '@tetherto/wdk-wallet'
 
 import { WalletAccountReadOnlyTron } from '@tetherto/wdk-wallet-tron'
 
-/** @typedef {import('tronweb').default } TronWeb */
+/** @typedef {import('tronweb').TronWeb } TronWeb */
 
 /** @typedef {import('@tetherto/wdk-wallet-tron').TronTransaction} TronTransaction */
 /** @typedef {import('@tetherto/wdk-wallet-tron').TransactionResult} TransactionResult */
@@ -28,6 +28,18 @@ import { WalletAccountReadOnlyTron } from '@tetherto/wdk-wallet-tron'
 /** @typedef {import('@tetherto/wdk-wallet-tron').TransferResult} TransferResult */
 
 /** @typedef {import('@tetherto/wdk-wallet-tron').TronTransactionReceipt } TronTransactionReceipt */
+/** @typedef {import('@tetherto/wdk-wallet-tron').TronActivationFee } TronActivationFee */
+
+/** @typedef {import('@tetherto/wdk-wallet').TransactionReceipt} TransactionReceipt */
+/** @typedef {import('@tetherto/wdk-wallet').WaitForTransactionOptions} WaitForTransactionOptions */
+
+/**
+ * The tron-specific fields added to a normalized transaction receipt.
+ *
+ * @typedef {Object} TronGasfreeTransactionDetails
+ * @property {number | null} confirmations - The confirmation depth, or null while it can't be resolved.
+ * @property {TronTransactionReceipt | null} receipt - The native tron receipt, or null while the transaction is pending or dropped.
+ */
 
 /**
  * @typedef {Object} TronGasfreeWalletConfig
@@ -35,11 +47,32 @@ import { WalletAccountReadOnlyTron } from '@tetherto/wdk-wallet-tron'
  * @property {string | TronWeb | Array<string | TronWeb>} provider - The url of the tron web provider, or an instance of the {@link TronWeb} class.
  * @property {number} [retries] - The number of retries in the failover mechanism.
  * @property {string} gasFreeProvider - The gasfree provider's url.
- * @property {string} gasFreeApiKey - The gasfree provider's api key.
- * @property {string} gasFreeApiSecret - The gasfree provider's api secret.
+ * @property {string} [gasFreeApiKey] - The gasfree provider's api key.
+ * @property {string} [gasFreeApiSecret] - The gasfree provider's api secret.
  * @property {string} serviceProvider - The address of the service provider.
  * @property {string} verifyingContract - The address of the verifying contract.
  * @property {number | bigint} [transferMaxFee] - The maximum fee amount for transfer operations.
+ * @property {number | bigint} [transactionMaxFee] - The maximum fee amount for sendTransaction and signTransaction operations.
+ */
+
+/**
+ * @typedef {Object} TronGasfreeAssetInfo
+ * @property {string} tokenAddress - The token's smart contract address.
+ * @property {string} tokenSymbol - The token's symbol.
+ * @property {number} activateFee - The fee to activate the account for this token.
+ * @property {number} transferFee - The fee for transferring this token.
+ * @property {number} decimal - The token's decimals.
+ * @property {number} frozen - Whether the token is frozen.
+ */
+
+/**
+ * @typedef {Object} TronGasfreeAccountInfo
+ * @property {string} accountAddress - The owner's account address.
+ * @property {string} gasFreeAddress - The gasfree contract address for the account.
+ * @property {boolean} active - Whether the gasfree account is active.
+ * @property {number} nonce - The account's nonce.
+ * @property {boolean} allowSubmit - Whether the account is allowed to submit transactions.
+ * @property {TronGasfreeAssetInfo[]} assets - The list of supported assets and their info.
  */
 
 const TRON_CHAIN_ID = 728126428
@@ -50,24 +83,27 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
    * Creates a new read-only tron gasfree wallet account.
    *
    * @param {string} address - The tron account's address.
-   * @param {Omit<TronGasfreeWalletConfig, 'transferMaxFee'>} config - The configuration object.
+   * @param {Omit<TronGasfreeWalletConfig, 'transferMaxFee' | 'transactionMaxFee'>} config - The configuration object.
    */
   constructor (address, config) {
     super(undefined)
+
+    const { gasFreeApiKey, gasFreeApiSecret } = config
+
+    if ((gasFreeApiKey && !gasFreeApiSecret) || (!gasFreeApiKey && gasFreeApiSecret)) {
+      throw new Error("The 'gasFreeApiKey' and the 'gasFreeApiSecret' options must be provided together.")
+    }
 
     /**
      * The tron gasfree wallet account configuration.
      *
      * @protected
-     * @type {Omit<TronGasfreeWalletConfig, 'transferMaxFee'>}
+     * @type {Omit<TronGasfreeWalletConfig, 'transferMaxFee' | 'transactionMaxFee'>}
      */
     this._config = config
 
     /** @private */
     this._ownerAccountAddress = address
-
-    /** @private */
-    this._gasFreeAccount = undefined
   }
 
   async getAddress () {
@@ -115,15 +151,25 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
    * Quotes the costs of a transfer operation.
    *
    * @param {TransferOptions} options - The transfer's options.
-   * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
+   * @returns {Promise<Omit<TransferResult, 'hash'> & TronActivationFee>} The transfer's quotes.
    */
-  async quoteTransfer ({ token, recipient, amount }) {
+  async quoteTransfer ({ token }) {
     const gasFreeAccount = await this._getGasfreeAccount()
 
-    const response = await this._sendRequestToGasfreeProvider(
-      'GET',
-      '/api/v1/config/token/all'
-    )
+    return this._quoteTransferWithAccount(gasFreeAccount, { token })
+  }
+
+  /**
+   * Quotes the costs of a transfer operation using a pre-fetched gasfree account.
+   *
+   * @protected
+   * @param {TronGasfreeAccountInfo} gasFreeAccount - The pre-fetched gasfree account.
+   * @param {TransferOptions} options - The transfer's options.
+   * @returns {Promise<Omit<TransferResult, 'hash'> & TronActivationFee>} The transfer's quotes.
+   * @throws {Error} If the provider doesn't support the given TRC-20 token.
+   */
+  async _quoteTransferWithAccount (gasFreeAccount, { token }) {
+    const response = await this._sendRequestToGasfreeProvider('GET', '/api/v1/config/token/all')
 
     const resp = await response.json()
 
@@ -131,19 +177,35 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
       throw new Error(resp.reason)
     }
 
-    const paymasterToken = resp.data.tokens.find(
-      ({ tokenAddress }) => tokenAddress === token
-    )
-    const fee =
-      paymasterToken.transferFee +
-      +gasFreeAccount.active * paymasterToken.activateFee
+    const paymasterToken = resp.data.tokens.find(({ tokenAddress }) => tokenAddress === token)
 
-    return { fee: BigInt(fee) }
+    if (!paymasterToken) {
+      throw new Error(`Token ${token} is not supported by the gasfree provider.`)
+    }
+
+    const activationFee = !gasFreeAccount.active ? paymasterToken.activateFee : 0
+    const fee = BigInt(paymasterToken.transferFee) + BigInt(activationFee)
+
+    return { fee: BigInt(fee), activationFee: BigInt(activationFee) }
+  }
+
+  /**
+   * Verifies a message's signature.
+   *
+   * @param {string} message - The original message.
+   * @param {string} signature - The signature to verify.
+   * @returns {Promise<boolean>} True if the signature is valid.
+   */
+  async verify (message, signature) {
+    const tronReadOnlyAccount = new WalletAccountReadOnlyTron(this._ownerAccountAddress, this._config)
+
+    return await tronReadOnlyAccount.verify(message, signature)
   }
 
   /**
    * Returns a transaction's receipt.
    *
+   * @deprecated Use {@link getTransaction} instead, which returns a normalized, finality-based receipt. The raw tron receipt remains available on its `receipt` property.
    * @param {string} hash - The transaction's hash.
    * @returns {Promise<TronTransactionReceipt | null>} The receipt, or null if the transaction has not been included in a block yet.
    */
@@ -158,28 +220,63 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
   }
 
   /**
+   * Returns a normalized, finality-based receipt for a gasfree transfer.
+   *
+   * @param {string} hash - The gasfree transfer's id.
+   * @returns {Promise<TransactionReceipt & TronGasfreeTransactionDetails>} The normalized receipt.
+   * @throws {NoSuchElementError} If no transfer has been found for the given hash.
+   */
+  async getTransaction (hash) {
+    const tronReadOnlyAccount = await this._getTronReadOnlyAccount()
+
+    const txHash = await this._getTokenTransferHash(hash)
+
+    if (!txHash) {
+      throw new NoSuchElementError(`No transfer found for '${hash}'.`)
+    }
+
+    const info = await tronReadOnlyAccount.getTransaction(txHash)
+
+    return { ...info, hash }
+  }
+
+  /**
+   * Blocks until a transaction reaches a terminal state (the requested finality target or `dropped`), or times out.
+   *
+   * @param {string} hash - The gasfree transfer's id.
+   * @param {WaitForTransactionOptions} [options] - The wait options.
+   * @returns {Promise<TransactionReceipt & TronGasfreeTransactionDetails>} The terminal receipt: the finality target reached (inspect `success` to tell success from revert), or `dropped`.
+   * @throws {TimeoutError} If the target is not reached before the timeout.
+   */
+  async waitForTransaction (hash, options = {}) {
+    return await super.waitForTransaction(hash, options)
+  }
+
+  /**
+   * Overrides the base default to allow for the gasfree provider's relay and tron confirmation latency.
+   *
+   * @type {number}
+   */
+  get defaultWaitTimeout () {
+    return 120000
+  }
+
+  /**
    * Returns the gasfree provider's account.
    *
    * @protected
-   * @returns {Promise<any>} The gasfree provider's account.
+   * @returns {Promise<TronGasfreeAccountInfo>} The gasfree provider's account.
    */
   async _getGasfreeAccount () {
-    if (!this._gasFreeAccount) {
-      const response = await this._sendRequestToGasfreeProvider(
-        'GET',
-        `/api/v1/address/${this._ownerAccountAddress}`
-      )
+    const response = await this._sendRequestToGasfreeProvider('GET', `/api/v1/address/${this._ownerAccountAddress}`)
 
-      const resp = await response.json()
+    const resp = await response.json()
 
-      if (resp.code !== 200) {
-        throw new Error(resp.reason)
-      }
-
-      this._gasFreeAccount = resp.data
+    if (resp.code !== 200) {
+      throw new Error(resp.reason)
     }
 
-    return this._gasFreeAccount
+    return resp.data
   }
 
   /**
@@ -192,8 +289,6 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
    * @returns {Promise<Response>} The http response.
    */
   async _sendRequestToGasfreeProvider (method, path, body) {
-    const timestamp = Math.floor(Date.now() / 1_000)
-
     const chainId = Number(this._config.chainId)
 
     if (![NILE_CHAIN_ID, TRON_CHAIN_ID].includes(chainId)) {
@@ -202,20 +297,27 @@ export default class WalletAccountReadOnlyTronGasfree extends WalletAccountReadO
       )
     }
 
-    const prefix = chainId === NILE_CHAIN_ID ? '/nile' : '/tron'
-
-    const message = method + prefix + path + timestamp
-
-    const signature = createHmac('sha256', this._config.gasFreeApiSecret)
-      .update(message)
-      .digest('base64')
-
     const url = this._config.gasFreeProvider + path
 
     const headers = {
-      Timestamp: `${timestamp}`,
-      Authorization: `ApiKey ${this._config.gasFreeApiKey}:${signature}`,
       'Content-Type': 'application/json'
+    }
+
+    const { gasFreeApiKey, gasFreeApiSecret } = this._config
+
+    if (gasFreeApiKey && gasFreeApiSecret) {
+      const timestamp = Math.floor(Date.now() / 1_000)
+
+      const prefix = chainId === NILE_CHAIN_ID ? '/nile' : '/tron'
+
+      const message = method + prefix + path + timestamp
+
+      const signature = createHmac('sha256', gasFreeApiSecret)
+        .update(message)
+        .digest('base64')
+
+      headers.Timestamp = `${timestamp}`
+      headers.Authorization = `ApiKey ${gasFreeApiKey}:${signature}`
     }
 
     const response = await fetch(url, {

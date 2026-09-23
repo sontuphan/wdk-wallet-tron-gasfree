@@ -18,7 +18,7 @@ import WalletManager from '@tetherto/wdk-wallet'
 
 import WalletManagerTron from '@tetherto/wdk-wallet-tron'
 
-import TronWeb from 'tronweb'
+import { TronWeb } from 'tronweb'
 
 import WalletAccountTronGasfree from './wallet-account-tron-gasfree.js'
 
@@ -106,16 +106,23 @@ export default class WalletManagerTronGasfree extends WalletManager {
    */
   async getAccountByPath (path) {
     if (!this._accounts[path]) {
-      const account = new WalletAccountTronGasfree(
-        this.seed,
-        path,
-        this._config
-      )
+      const account = new WalletAccountTronGasfree(this.seed, path, this._accountConfig())
 
       this._accounts[path] = account
     }
 
     return this._accounts[path]
+  }
+
+  /**
+   * Builds the account config, injecting the manager's shared tron web client so accounts
+   * reuse it instead of opening their own.
+   *
+   * @private
+   * @returns {TronGasfreeWalletConfig} The account configuration.
+   */
+  _accountConfig () {
+    return { ...this._config, provider: this._tronWeb }
   }
 
   /**

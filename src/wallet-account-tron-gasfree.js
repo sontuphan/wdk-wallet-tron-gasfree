@@ -18,7 +18,7 @@ import { WalletAccountTron } from '@tetherto/wdk-wallet-tron'
 
 import { secp256k1 } from '@noble/curves/secp256k1'
 
-import TronWeb from 'tronweb'
+import { utils as TronWebUtils } from 'tronweb'
 
 import WalletAccountReadOnlyTronGasfree from './wallet-account-read-only-tron-gasfree.js'
 
@@ -30,6 +30,7 @@ import WalletAccountReadOnlyTronGasfree from './wallet-account-read-only-tron-ga
 /** @typedef {import('@tetherto/wdk-wallet-tron').TransactionResult} TransactionResult */
 /** @typedef {import('@tetherto/wdk-wallet-tron').TransferOptions} TransferOptions */
 /** @typedef {import('@tetherto/wdk-wallet-tron').TransferResult} TransferResult */
+/** @typedef {import('@tetherto/wdk-wallet-tron').TronActivationFee} TronActivationFee */
 
 /** @typedef {import('@tetherto/wdk-wallet-tron').TronTransactionReceipt } TronTransactionReceipt */
 
@@ -100,6 +101,10 @@ export default class WalletAccountTronGasfree extends WalletAccountReadOnlyTronG
   /**
    * The account's key pair.
    *
+   * The uint8 arrays are bound to the wallet account, so any external change will reflect to the internal representation. For this reason,
+   * it's strongly recommended to treat the key pair as a read-only view of the keys. While it's still technically possible to alter their
+   * content, client code should never do so.
+   *
    * @type {KeyPair}
    */
   get keyPair () {
@@ -117,14 +122,13 @@ export default class WalletAccountTronGasfree extends WalletAccountReadOnlyTronG
   }
 
   /**
-   * Verifies a message's signature.
+   * Signs a transaction.
    *
-   * @param {string} message - The original message.
-   * @param {string} signature - The signature to verify.
-   * @returns {Promise<boolean>} True if the signature is valid.
+   * @param {TronTransaction} tx - The transaction.
+   * @returns {Promise<never>} Never resolves; always throws.
    */
-  async verify (message, signature) {
-    return await this._ownerAccount.verify(message, signature)
+  async signTransaction (tx) {
+    throw new Error("Method 'signTransaction(tx)' not supported on tron gasfree.")
   }
 
   /**
@@ -143,16 +147,17 @@ export default class WalletAccountTronGasfree extends WalletAccountReadOnlyTronG
    * @param {TransferOptions} options - The transfer's options.
    * @param {Object} [config] - A configuration object containing additional options.
    * @param {number | bigint} [config.transferMaxFee] - The maximum fee amount for the transfer operation.
-   * @returns {Promise<TransferResult>} The transfer's result.
+   * @returns {Promise<TransferResult & TronActivationFee>} The transfer's result.
+   * @throws {Error} If the transfer's cost exceeds the maximum transfer fee option.
    */
   async transfer ({ token, recipient, amount }, config = {}) {
     const address = await this._ownerAccount.getAddress()
 
     const gasFreeAccount = await this._getGasfreeAccount()
 
-    const { fee: feeEstimate } = await this.quoteTransfer({ token, recipient, amount })
+    const { fee: feeEstimate } = await this._quoteTransferWithAccount(gasFreeAccount, { token })
 
-    if (config.transferMaxFee !== undefined && feeEstimate >= config.transferMaxFee) {
+    if (config.transferMaxFee !== undefined && feeEstimate > BigInt(config.transferMaxFee)) {
       throw new Error('The transfer operation exceeds the transfer max fee.')
     }
 
@@ -190,9 +195,10 @@ export default class WalletAccountTronGasfree extends WalletAccountReadOnlyTronG
       throw new Error(resp.reason)
     }
 
-    const fee = resp.data.estimatedTransferFee + resp.data.estimatedActivateFee
+    const activationFee = BigInt(resp.data.estimatedActivateFee || 0)
+    const fee = BigInt(resp.data.estimatedTransferFee) + activationFee
 
-    return { hash: resp.data.id, fee: BigInt(fee) }
+    return { hash: resp.data.id, fee, activationFee }
   }
 
   /**
@@ -201,11 +207,12 @@ export default class WalletAccountTronGasfree extends WalletAccountReadOnlyTronG
    * @returns {Promise<WalletAccountReadOnlyTronGasfree>} The read-only account.
    */
   async toReadOnlyAccount () {
-    const address = await this._ownerAccount.getAddress()
+    if (!this._tronGasfreeReadOnlyAccount) {
+      const address = await this._ownerAccount.getAddress()
+      this._tronGasfreeReadOnlyAccount = new WalletAccountReadOnlyTronGasfree(address, this._config)
+    }
 
-    const readOnlyAccount = new WalletAccountReadOnlyTronGasfree(address, this._config)
-
-    return readOnlyAccount
+    return this._tronGasfreeReadOnlyAccount
   }
 
   /**
@@ -217,7 +224,7 @@ export default class WalletAccountTronGasfree extends WalletAccountReadOnlyTronG
 
   /** @private */
   _signTypedData (domain, value) {
-    const messageDigest = TronWeb.utils._TypedDataEncoder
+    const messageDigest = TronWebUtils._TypedDataEncoder
       .hash(domain, PERMIT_712_TYPES, value)
       .slice(2)
 
